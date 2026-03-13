@@ -69,47 +69,67 @@ valid_families = family_counts[
 print(f"Valid families: {len(valid_families)}")
 
 # ============================================================
-# 3. GEOMETRIC + SIZE AWARE SCORE
+# 3. BHATTACHARYYA-BASED SEPARABILITY SCORE
 # ============================================================
+
+from numpy.linalg import det, inv
 
 scaler = RobustScaler()
 X_all = scaler.fit_transform(df[features])
 X_all = pd.DataFrame(X_all, columns=features)
 
-centroids = {}
-spreads = {}
+means = {}
+covs = {}
 
 for fam in valid_families:
     mask = df['family1'] == fam
     X_f = X_all[mask].values
 
-    centroids[fam] = X_f.mean(axis=0)
-    spreads[fam] = np.trace(np.cov(X_f, rowvar=False))
+    means[fam] = X_f.mean(axis=0)
+    cov = np.cov(X_f, rowvar=False)
+
+    # Regularização para evitar singularidade
+    cov += 1e-6 * np.eye(cov.shape[0])
+
+    covs[fam] = cov
+
+def bhattacharyya_distance(mu1, mu2, S1, S2):
+    S = 0.5 * (S1 + S2)
+    diff = mu1 - mu2
+
+    term1 = 0.125 * diff.T @ inv(S) @ diff
+    term2 = 0.5 * np.log(det(S) / np.sqrt(det(S1) * det(S2)))
+
+    return term1 + term2
 
 scores = {}
 
 for fam in valid_families:
 
-    dists = []
+    distances = []
+
     for other in valid_families:
         if fam == other:
             continue
-        dist = np.linalg.norm(centroids[fam] - centroids[other])
-        dists.append(dist)
 
-    min_dist = min(dists)
+        d = bhattacharyya_distance(
+            means[fam],
+            means[other],
+            covs[fam],
+            covs[other]
+        )
 
-    spread_term = np.sqrt(spreads[fam]) if spreads[fam] > 0 else 1e-6
-    size_term = np.log(family_counts[fam])
+        distances.append(d)
 
-    score = (min_dist / spread_term) * (1 / size_term)
+    # usamos a menor distância (caso mais crítico)
+    min_db = min(distances)
 
-    scores[fam] = score
+    scores[fam] = min_db
 
-# Now select top 15
+# Selecionar top 15 famílias mais separadas
 top_candidates = sorted(scores, key=scores.get, reverse=True)[:15]
 
-print("Top candidates (compact + small + separated):")
+print("Top candidates (Bhattacharyya separability):")
 for fam in top_candidates:
     print(f"Family {fam}: size={family_counts[fam]}, score={scores[fam]:.4f}")
 
