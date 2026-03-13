@@ -9,7 +9,10 @@ from model import Model
 
 
 class FamilySelector:
+    """Search for family subsets that produce the best clustering completeness."""
+
     def __init__(self, model: Model, min_size: int = 300, max_size: int = 2000, top_k_candidates: int = 15, group_size: int = 8) -> None:
+        """Configure selection limits and keep a reference to the shared `Model`."""
         self._model = model
         self._min_size = min_size
         self._max_size = max_size
@@ -18,6 +21,7 @@ class FamilySelector:
 
     @staticmethod
     def _bhattacharyya_distance(mu1: np.ndarray, mu2: np.ndarray, s1: np.ndarray, s2: np.ndarray) -> float:
+        """Compute Bhattacharyya distance between two Gaussian approximations."""
         s = 0.5 * (s1 + s2)
         diff = mu1 - mu2
 
@@ -28,6 +32,7 @@ class FamilySelector:
 
     @staticmethod
     def _family_completeness(y_true: pd.Series, y_pred: np.ndarray, group: list[int]) -> tuple[float, float]:
+        """Return average and minimum family completeness for a tested group."""
         fam_comp = []
         groups_str = [str(g) for g in group]
         
@@ -43,6 +48,7 @@ class FamilySelector:
         return avg_family, min_family
 
     def _get_valid_families(self, df: pd.DataFrame) -> list[Any]:
+        """Filter families by size bounds to avoid tiny/noisy or huge-dominant groups."""
         family_counts = df['family1'].value_counts()
         valid_families = family_counts[
             (family_counts >= self._min_size) &
@@ -52,6 +58,7 @@ class FamilySelector:
         return valid_families
 
     def _get_top_candidates(self, df: pd.DataFrame, valid_families: list[Any]) -> list[Any]:
+        """Rank families by minimum Bhattacharyya distance and keep the top set."""
         features = ['a (AU)', 'e', 'sin I']
         X_all = self._model._normalize(df[features])
         X_all = pd.DataFrame(X_all, columns=features)
@@ -91,6 +98,7 @@ class FamilySelector:
         return top_candidates
 
     def find_best_group(self) -> dict[str, Any]:
+        """Evaluate candidate combinations and return the best group and summary metrics."""
         df = self._model.get_data()
         valid_families = self._get_valid_families(df)
         top_candidates = self._get_top_candidates(df, valid_families)

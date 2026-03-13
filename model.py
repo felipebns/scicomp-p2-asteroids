@@ -6,13 +6,17 @@ from sklearn.preprocessing import RobustScaler
 from sklearn.mixture import GaussianMixture
 
 class Model:
+    """Run asteroid-family clustering and report quality metrics/plots."""
+
     def __init__(self, groups: list, covariance_type: str, n_init: int) -> None:
+        """Store model configuration for a fixed set of asteroid families."""
         self._groups = groups
         self._covariance_type = covariance_type
         self._n_init = n_init
 
     @staticmethod
     def _read_fwf_path(path: str, skiprows: int) -> pd.DataFrame:
+        """Read a fixed-width file using the project parsing settings."""
         return pd.read_fwf(
             path,
             sep=r"\s{2,}",
@@ -22,6 +26,7 @@ class Model:
 
     @staticmethod
     def _merge_dfs(df_asteroid: pd.DataFrame, df_family: pd.DataFrame) -> pd.DataFrame:
+        """Keep numbered objects and merge orbital data with family labels."""
         df_asteroid = df_asteroid[df_asteroid['%Name'].astype(str).str.fullmatch(r'\d+')]
         df_family = df_family[df_family['%ast.name'].astype(str).str.fullmatch(r'\d+')]
         df_family = df_family[['%ast.name', 'family1']]
@@ -37,11 +42,13 @@ class Model:
     
     @staticmethod
     def _normalize(X_raw: pd.DataFrame) -> np.ndarray:
+        """Scale features with `RobustScaler` to reduce outlier sensitivity."""
         scaler = RobustScaler()
         X = scaler.fit_transform(X_raw)
         return X
     
     def get_data(self) -> pd.DataFrame:
+        """Extract source files, load tables, merge them, and drop unused columns."""
         with zipfile.ZipFile('data/asteroid.zip', 'r') as zip_ref:
             zip_ref.extractall('data/')
 
@@ -58,6 +65,7 @@ class Model:
         return df
     
     def get_features_target(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+        """Return selected orbital features and family labels for configured groups."""
         features = ['a (AU)', 'e', 'sin I']
 
         df_dataset = df[df["family1"].isin(self._groups)].copy()
@@ -69,6 +77,7 @@ class Model:
         return X_raw, y
     
     def get_clustering_results(self, X_raw: np.ndarray) -> np.ndarray:
+        """Fit `GaussianMixture` and return cluster labels as string IDs."""
         X = self._normalize(X_raw)
         gmm = GaussianMixture(
             n_components=len(self._groups),
@@ -83,6 +92,7 @@ class Model:
         return results_str
     
     def evaluate_clustering(self, y_true: pd.Series, y_pred: np.ndarray) -> None:
+        """Print completeness per family and the average completeness."""
         fam_comp = []
         groups_str = [str(g) for g in self._groups]
 
@@ -96,6 +106,7 @@ class Model:
         print(f"\nAvg Family Completeness: {np.mean(fam_comp)}%")
 
     def plot_3d_real_vs_pred(self, X_raw: pd.DataFrame, y_true: pd.Series, y_pred: np.ndarray) -> None:
+        """Show two interactive 3D scatter plots: real labels vs predicted labels."""
         df_plot = pd.DataFrame(X_raw).copy()
         df_plot.columns = ['a (AU)', 'e', 'sin I']
         df_plot['Real'] = np.array(y_true).astype(str)
