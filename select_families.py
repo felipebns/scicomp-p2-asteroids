@@ -1,188 +1,128 @@
-# select_families.py
-
-import pandas as pd
-import numpy as np
-import zipfile
 from itertools import combinations
-from sklearn.preprocessing import RobustScaler
-from sklearn.mixture import GaussianMixture
+from typing import Any
 
-# ============================================================
-# 1. LOAD DATA
-# ============================================================
-
-with zipfile.ZipFile('data/asteroid.zip', 'r') as zip_ref:
-    zip_ref.extractall('data/')
-
-df_asteroid = pd.read_fwf(
-    "data/asteroid_data.csv",
-    sep=r"\s{2,}",
-    skiprows=1,
-    engine="python"
-)
-
-df_family = pd.read_fwf(
-    "data/asteroids_family.csv",
-    sep=r"\s{2,}",
-    engine="python"
-)
-
-df_asteroid = df_asteroid[
-    df_asteroid['%Name'].astype(str).str.fullmatch(r'\d+')
-]
-
-df_family = df_family[
-    df_family['%ast.name'].astype(str).str.fullmatch(r'\d+')
-]
-
-df_family = df_family[['%ast.name', 'family1']]
-
-df = pd.merge(
-    df_asteroid,
-    df_family,
-    left_on='%Name',
-    right_on='%ast.name',
-    how='inner'
-)
-
-df = df.drop(columns=[
-    '%ast.name', 'mag.', 'n (deg/yr)',
-    'g ("/yr)', 's ("/yr)', 'LCEx1E6', 'My'
-])
-
-features = ['a (AU)', 'e', 'sin I']
-
-# ============================================================
-# 2. FILTER BY SIZE
-# ============================================================
-
-MIN_SIZE = 300
-MAX_SIZE = 2000
-
-family_counts = df['family1'].value_counts()
-
-valid_families = family_counts[
-    (family_counts >= MIN_SIZE) &
-    (family_counts <= MAX_SIZE)
-].index.tolist()
-
-print(f"Valid families: {len(valid_families)}")
-
-# ============================================================
-# 3. BHATTACHARYYA-BASED SEPARABILITY SCORE
-# ============================================================
-
+import numpy as np
+import pandas as pd
 from numpy.linalg import det, inv
 
-scaler = RobustScaler()
-X_all = scaler.fit_transform(df[features])
-X_all = pd.DataFrame(X_all, columns=features)
+from model import Model
 
-means = {}
-covs = {}
 
-for fam in valid_families:
-    mask = df['family1'] == fam
-    X_f = X_all[mask].values
+class FamilySelector:
+    def __init__(self, model: Model, min_size: int = 300, max_size: int = 2000, top_k_candidates: int = 15, group_size: int = 8) -> None:
+        self._model = model
+        self._min_size = min_size
+        self._max_size = max_size
+        self._top_k_candidates = top_k_candidates
+        self._group_size = group_size
 
-    means[fam] = X_f.mean(axis=0)
-    cov = np.cov(X_f, rowvar=False)
+    @staticmethod
+    def _bhattacharyya_distance(mu1: np.ndarray, mu2: np.ndarray, s1: np.ndarray, s2: np.ndarray) -> float:
+        s = 0.5 * (s1 + s2)
+        diff = mu1 - mu2
 
-    # Regularização para evitar singularidade
-    cov += 1e-6 * np.eye(cov.shape[0])
+        term1 = 0.125 * diff.T @ inv(s) @ diff
+        term2 = 0.5 * np.log(det(s) / np.sqrt(det(s1) * det(s2)))
 
-    covs[fam] = cov
+        return float(term1 + term2)
 
-def bhattacharyya_distance(mu1, mu2, S1, S2):
-    S = 0.5 * (S1 + S2)
-    diff = mu1 - mu2
+    @staticmethod
+    def _family_completeness(y_true: pd.Series, y_pred: np.ndarray, group: list[int]) -> tuple[float, float]:
+        fam_comp = []
+        groups_str = [str(g) for g in group]
+        
+        for fam in groups_str:
+            mask = y_true == fam
+            counts = pd.Series(y_pred[mask]).value_counts()
+            pct = (counts.iloc[0] / mask.sum()) * 100
+            fam_comp.append(pct)
 
-    term1 = 0.125 * diff.T @ inv(S) @ diff
-    term2 = 0.5 * np.log(det(S) / np.sqrt(det(S1) * det(S2)))
+        avg_family = float(np.mean(fam_comp))
+        min_family = float(np.min(fam_comp))
 
-    return term1 + term2
+        return avg_family, min_family
 
-scores = {}
+    def _get_valid_families(self, df: pd.DataFrame) -> list[Any]:
+        family_counts = df['family1'].value_counts()
+        valid_families = family_counts[
+            (family_counts >= self._min_size) &
+            (family_counts <= self._max_size)
+        ].index.tolist()
 
-for fam in valid_families:
+        return valid_families
 
-    distances = []
+    def _get_top_candidates(self, df: pd.DataFrame, valid_families: list[Any]) -> list[Any]:
+        features = ['a (AU)', 'e', 'sin I']
+        X_all = self._model._normalize(df[features])
+        X_all = pd.DataFrame(X_all, columns=features)
 
-    for other in valid_families:
-        if fam == other:
-            continue
+        means = {}
+        covs = {}
 
-        d = bhattacharyya_distance(
-            means[fam],
-            means[other],
-            covs[fam],
-            covs[other]
-        )
+        for fam in valid_families:
+            mask = df['family1'] == fam
+            X_f = X_all[mask].values
 
-        distances.append(d)
+            means[fam] = X_f.mean(axis=0)
+            cov = np.cov(X_f, rowvar=False)
+            cov += 1e-6 * np.eye(cov.shape[0])
+            covs[fam] = cov
 
-    # usamos a menor distância (caso mais crítico)
-    min_db = min(distances)
+        scores = {}
 
-    scores[fam] = min_db
+        for fam in valid_families:
+            distances = []
 
-# Selecionar top 15 famílias mais separadas
-top_candidates = sorted(scores, key=scores.get, reverse=True)[:15]
+            for other in valid_families:
+                if fam == other:
+                    continue
 
-print("Top candidates (Bhattacharyya separability):")
-for fam in top_candidates:
-    print(f"Family {fam}: size={family_counts[fam]}, score={scores[fam]:.4f}")
+                d = self._bhattacharyya_distance(
+                    means[fam],
+                    means[other],
+                    covs[fam],
+                    covs[other]
+                )
+                distances.append(d)
 
-# ============================================================
-# 4. TEST COMBINATIONS OF 8
-# ============================================================
+            scores[fam] = min(distances)
 
-best_group = None
-best_score = -np.inf
-best_metrics = None
+        top_candidates = sorted(scores, key=scores.get, reverse=True)[:self._top_k_candidates]
+        return top_candidates
 
-for group in combinations(top_candidates, 8):
+    def find_best_group(self) -> dict[str, Any]:
+        df = self._model.get_data()
+        valid_families = self._get_valid_families(df)
+        top_candidates = self._get_top_candidates(df, valid_families)
 
-    df_subset = df[df["family1"].isin(group)].copy()
-    df_subset["family1"] = df_subset["family1"].astype(str)
+        best_group = None
+        best_score = -np.inf
+        best_metrics = None
 
-    X_raw = df_subset[features]
-    y = df_subset["family1"]
+        for group in combinations(top_candidates, self._group_size):
+            original_groups = self._model._groups
+            self._model._groups = list(group)
 
-    X_scaled = scaler.fit_transform(X_raw)
+            X_raw, y = self._model.get_features_target(df)
+            y_pred = self._model.get_clustering_results(X_raw)
 
-    gmm = GaussianMixture(
-        n_components=8,
-        covariance_type='full',
-        n_init=10,
-        random_state=42
-    )
+            self._model._groups = original_groups
 
-    labels = gmm.fit_predict(X_scaled)
-    labels_str = np.array([f"C{i}" for i in labels])
+            avg_family, min_family = self._family_completeness(y, y_pred, group)
+            score = avg_family + 0.5 * min_family
 
-    fam_comp = []
+            if score > best_score:
+                best_score = score
+                best_group = group
+                best_metrics = (avg_family, min_family)
 
-    for fam in map(str, group):
-        mask = y == fam
-        counts = pd.Series(labels_str[mask]).value_counts()
-        pct = (counts.iloc[0] / mask.sum()) * 100
-        fam_comp.append(pct)
+            print(f"{group} -> avg={avg_family:.1f}% min={min_family:.1f}%")
 
-    avg_family = np.mean(fam_comp)
-    min_family = np.min(fam_comp)
-
-    score = avg_family + 0.5 * min_family
-
-    if score > best_score:
-        best_score = score
-        best_group = group
-        best_metrics = (avg_family, min_family)
-
-    print(f"{group} → avg={avg_family:.1f}% min={min_family:.1f}%")
-
-print("\n==============================")
-print("BEST GROUP FOUND:")
-print(best_group)
-print("Avg completeness:", best_metrics[0])
-print("Min completeness:", best_metrics[1])
+        return {
+            'best_group': best_group,
+            'avg_completeness': best_metrics[0] if best_metrics else None,
+            'min_completeness': best_metrics[1] if best_metrics else None,
+            'score': float(best_score),
+            'top_candidates': top_candidates,
+            'valid_families_count': len(valid_families),
+        }
